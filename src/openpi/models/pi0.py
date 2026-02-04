@@ -186,6 +186,7 @@ class Pi0(_model.BaseModel):
         return tokens, input_mask, ar_mask, adarms_cond
 
     @override
+    # 实现基于流匹配的训练方法，用于训练机器人策略模型，通过学习从噪声到真实动作的连续流来预测机器人的动作序列
     def compute_loss(
         self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
     ) -> at.Float[at.Array, "*b ah"]:
