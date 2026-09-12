@@ -312,6 +312,11 @@ def restore_params(
 
     with ocp.PyTreeCheckpointer() as ckptr:
         metadata = ckptr.metadata(params_path)
+        # openpi-b300 的 uv 环境使用 Orbax 0.11.25,metadata 返回 StepMetadata,
+        # 直接 metadata["params"] 会报错;这里解包 item_metadata,
+        # 同时兼容 openpi 环境中的 Orbax 0.11.13。原因是依赖版本差异,并非 B300 硬件。
+        if hasattr(metadata, "item_metadata"):
+            metadata = metadata.item_metadata
         item = {"params": metadata["params"]}
 
         params = ckptr.restore(

@@ -1,5 +1,7 @@
 from flax import nnx
 import jax
+import numpy as np
+import orbax.checkpoint as ocp
 import pytest
 
 from openpi.models import model as _model
@@ -73,6 +75,19 @@ def test_pi0_fast_lora_model():
 
     lora_state_elems = list(model_state.filter(lora_filter))
     assert len(lora_state_elems) > 0
+
+
+@pytest.mark.parametrize("restore_type", [np.ndarray, jax.Array])
+def test_restore_params_local(tmp_path, restore_type):
+    path = tmp_path / "params"
+    expected = np.arange(6, dtype=np.float32).reshape(2, 3)
+    with ocp.PyTreeCheckpointer() as ckptr:
+        ckptr.save(path, {"params": {"linear": {"kernel": {"value": expected}}}})
+
+    restored = _model.restore_params(path, restore_type=restore_type)
+
+    assert isinstance(restored["linear"]["kernel"], restore_type)
+    np.testing.assert_array_equal(restored["linear"]["kernel"], expected)
 
 
 @pytest.mark.manual
