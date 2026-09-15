@@ -50,16 +50,38 @@ class EpisodeReplay:
         }
 
 
-def make_batch(samples, tokenizer, norm_stats):
-    """Raw physical states/actions -> critic inputs. No second delta transform."""
+def make_batch(samples, tokenizer, norm_stats, *, td_steps=10):
+    """Build chunk-level n-step targets (default 10), truncated at terminals/episode end.
+
+    Discounts already include the executed chunk length and terminal flag.
+    Multiply stored discounts rather than assuming every chunk has H actions.
+    """
+    if isinstance(td_steps, bool) or not isinstance(td_steps, int) or td_steps < 1:
+        raise ValueError("td_steps must be a positive integer")
+    samples = list(samples)
+    if not samples:
+        raise ValueError("Cannot build an empty replay batch")
     normalize = transforms.Normalize(norm_stats, use_quantiles=True)
 
-    def observation(offset):
-        state = np.stack([e["state"][i + offset] for e, i in samples])
+    windows = []
+    for episode, index in samples:
+        if not 0 <= index < len(episode["rewards"]):
+            raise ValueError("Replay index must identify a current-state transition")
+        reward, discount, end = 0.0, 1.0, index
+        for end in range(index, min(index + td_steps, len(episode["rewards"]))):
+            reward += discount * float(episode["rewards"][end])
+            discount *= float(episode["discounts"][end])
+            if discount == 0.0:
+                break
+        windows.append((end + 1, reward, discount))
+
+    def observation(indices):
+        state = np.stack([e["state"][i] for (e, _), i in zip(samples, indices, strict=True)])
         state = normalize({"state": state})["state"]
         tokens = [tokenizer.tokenize(str(e["prompt"]), s) for (e, _), s in zip(samples, state, strict=True)]
         images = {
-            key: np.stack([e[source][i + offset] for e, i in samples]).astype(np.float32) / 127.5 - 1.0
+            key: np.stack([e[source][i] for (e, _), i in zip(samples, indices, strict=True)]).astype(np.float32) / 127.5
+            - 1.0
             for key, source in [("base_0_rgb", "base"), ("left_wrist_0_rgb", "wrist")]
         }
         return {
@@ -74,12 +96,12 @@ def make_batch(samples, tokenizer, norm_stats):
     actions = normalize({"actions": actions})["actions"]
     actions = np.where(mask[..., None], actions, 0.0).astype(np.float32)
     batch = {
-        "obs": observation(0),
-        "next_obs": observation(1),
+        "obs": observation([i for _, i in samples]),
+        "next_obs": observation([end for end, _, _ in windows]),
         "actions": actions,
         "action_mask": mask,
-        "rewards": np.asarray([e["rewards"][i] for e, i in samples], dtype=np.float32),
-        "discounts": np.asarray([e["discounts"][i] for e, i in samples], dtype=np.float32),
+        "rewards": np.asarray([reward for _, reward, _ in windows], dtype=np.float32),
+        "discounts": np.asarray([discount for _, _, discount in windows], dtype=np.float32),
     }
     return jax.tree.map(jnp.asarray, batch)
 
