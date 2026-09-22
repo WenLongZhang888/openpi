@@ -1,5 +1,6 @@
 """Offline QAM updates for an already loaded BC actor and DIVL critic."""
 
+from collections.abc import Callable
 import dataclasses
 import functools
 import math
@@ -24,12 +25,16 @@ class QAMTrainingConfig:
     temperature: float = 2.0
     replan_steps: int = 5
     critic_horizon: int = 30
+    action_dim: int = 7
+    action_clip: tuple[float, float] | None = (-1.0, 1.0)
+    # LWD v4 IV-B uses the fixed BC reference for trajectory generation.
+    sample_from_reference: bool = False
     learning_rate: float = 2e-5
     weight_decay: float = 0.01
     max_grad_norm: float = 1.0
 
     def __post_init__(self):
-        for name in ("num_steps", "replan_steps", "critic_horizon"):
+        for name in ("num_steps", "replan_steps", "critic_horizon", "action_dim"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
@@ -39,6 +44,12 @@ class QAMTrainingConfig:
             raise ValueError("epsilon must be in (0, 1) and resolve the SDE step size")
         if self.replan_steps > self.critic_horizon:
             raise ValueError("replan_steps cannot exceed critic_horizon")
+        if self.action_clip is not None and (
+            len(self.action_clip) != 2
+            or not all(math.isfinite(x) for x in self.action_clip)
+            or self.action_clip[0] >= self.action_clip[1]
+        ):
+            raise ValueError("action_clip must be finite increasing bounds or None")
         for name in ("temperature", "learning_rate", "max_grad_norm"):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
@@ -92,9 +103,9 @@ class QAMActionStats:
     critic_q99: jax.Array
 
     @classmethod
-    def from_norm_stats(cls, actor_norm_stats, critic_norm_stats):
-        actor_low, actor_high = quantile_pair(actor_norm_stats, "actions", 7)
-        critic_low, critic_high = quantile_pair(critic_norm_stats, "actions", 7)
+    def from_norm_stats(cls, actor_norm_stats, critic_norm_stats, dimensions=7):
+        actor_low, actor_high = quantile_pair(actor_norm_stats, "actions", dimensions)
+        critic_low, critic_high = quantile_pair(critic_norm_stats, "actions", dimensions)
         return cls(*map(jnp.asarray, (actor_low, actor_high, critic_low, critic_high)))
 
 
@@ -105,7 +116,7 @@ class QAMBatch:
 
 
 def initialize_actor_training(
-    bc_actor: pi0.Pi0, config: QAMTrainingConfig = DEFAULT_QAM_CONFIG
+    bc_actor: pi0.Pi0, config: QAMTrainingConfig = DEFAULT_QAM_CONFIG, *, total_steps: int | None = None
 ) -> tuple[pi0.Pi0, nnx.Optimizer]:
     """Initialize ONCE, immediately after loading the BC checkpoint.
 
@@ -114,8 +125,10 @@ def initialize_actor_training(
     All actor parameters train offline. This is not a resume function: a
     resumed run must restore its original reference and optimizer state.
     """
-    if bc_actor.action_dim < 7 or bc_actor.action_horizon < config.replan_steps:
-        raise ValueError("BC actor cannot supply the configured LIBERO execution prefix")
+    if bc_actor.action_dim < config.action_dim or bc_actor.action_horizon < config.replan_steps:
+        raise ValueError("BC actor cannot supply the configured execution prefix")
+    if total_steps is not None and total_steps < 1:
+        raise ValueError("total_steps must be positive")
     bc_actor.eval()
     reference = nnx.clone(bc_actor)
     parameters = nnx.state(bc_actor, nnx.Param)
@@ -124,7 +137,12 @@ def initialize_actor_training(
         bc_actor,
         optax.chain(
             optax.clip_by_global_norm(config.max_grad_norm),
-            optax.adamw(config.learning_rate, weight_decay=config.weight_decay),
+            optax.adamw(
+                config.learning_rate
+                if total_steps is None
+                else optax.cosine_decay_schedule(config.learning_rate, total_steps),
+                weight_decay=config.weight_decay,
+            ),
         ),
         wrt=nnx.Param,
     )
@@ -136,8 +154,8 @@ def _validate_actor_update(actor, reference, optimizer, config):
         raise ValueError("reference must be an independent BC model")
     if optimizer.model is not actor:
         raise ValueError("actor optimizer belongs to a different model")
-    if actor.action_dim < 7 or actor.action_horizon < config.replan_steps:
-        raise ValueError("actor cannot supply the configured LIBERO execution prefix")
+    if actor.action_dim < config.action_dim or actor.action_horizon < config.replan_steps:
+        raise ValueError("actor cannot supply the configured execution prefix")
     if (actor.action_horizon, actor.action_dim) != (reference.action_horizon, reference.action_dim):
         raise ValueError("actor and reference must use the same action shape")
 
@@ -158,6 +176,8 @@ def actor_train_step(
     """Build fresh supervision using the current critic, then update actor.
 
     Both observations must describe the SAME raw states in the same order.
+    Path sampling uses the fixed reference when sample_from_reference=True;
+    otherwise it retains the existing current-actor sampler.
     No image augmentation: actor and critic see the collected images. eval()
     controls stochastic layers; it does not disable actor parameter gradients.
     The caller must retain the returned RNG for the next update.
@@ -172,7 +192,12 @@ def actor_train_step(
     # State encoding is independent of generated actions, so compute it once.
     z = jax.lax.stop_gradient(critic.encoder(**critic_observation, train=False))
     times, path = qam.sample_qam_path(
-        actor, observation, sample_rng, reference=reference, num_steps=config.num_steps, epsilon=config.epsilon
+        reference if config.sample_from_reference else actor,
+        observation,
+        sample_rng,
+        reference=reference,
+        num_steps=config.num_steps,
+        epsilon=config.epsilon,
     )
     terminal, terminal_metrics = qam.qam_terminal_adjoint(
         critic,
@@ -185,6 +210,8 @@ def actor_train_step(
         temperature=config.temperature,
         replan_steps=config.replan_steps,
         critic_horizon=config.critic_horizon,
+        action_dim=config.action_dim,
+        action_clip=config.action_clip,
     )
     adjoints = qam.qam_backward_adjoint(reference, observation, times, path, terminal)
     # Supervision was constructed outside the differentiated actor loss.
@@ -216,6 +243,7 @@ def offline_train_step(
     *,
     qam_config: QAMTrainingConfig = DEFAULT_QAM_CONFIG,
     divl_config: DIVLTrainingConfig = DEFAULT_DIVL_CONFIG,
+    actor_update_fn: Callable | None = None,
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
     """LWD Algorithm 2: V -> Q -> EMA -> QAM with the UPDATED online Q.
 
@@ -228,7 +256,7 @@ def offline_train_step(
     _validate_actor_update(actor, reference, actor_optimizer, qam_config)
     if critic is target_critic or critic_optimizer.model is not critic or value_optimizer.model is not critic:
         raise ValueError("critic needs an independent target and its own optimizer")
-    if batch.critic["actions"].shape[1:] != (qam_config.critic_horizon, 7):
+    if batch.critic["actions"].shape[1:] != (qam_config.critic_horizon, qam_config.action_dim):
         raise ValueError("replay action shape does not match the QAM critic configuration")
     if batch.actor_observation.state.shape[0] != batch.critic["actions"].shape[0]:
         raise ValueError("actor and critic batch sizes differ")
@@ -244,7 +272,8 @@ def offline_train_step(
         tau_max=divl_config.tau_max,
         ema_rate=divl_config.ema_rate,
     )
-    next_rng, actor_metrics = actor_train_step(
+    update_actor = actor_train_step if actor_update_fn is None else actor_update_fn
+    next_rng, actor_metrics = update_actor(
         actor,
         reference,
         critic,
