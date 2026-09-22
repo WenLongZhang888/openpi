@@ -1,0 +1,30 @@
+input_dir: /home/zwl/openpi/data/dagger/cube_rollout
+output_dir: /home/zwl/openpi/data/lerobot/cube_0920_100
+repo_id: cube_0920_100
+source_task: pick and place cube
+task: cube
+robot_type: airbot
+fps: 25
+min_frames: 2
+recursive: false
+require_outcome: false
+images:
+  resize: openpi
+  height: 224
+  width: 224
+topics:
+  state:
+  - /left/arm/joint_state/position
+  - /left/eef/joint_state/position
+  - /right/arm/joint_state/position
+  - /right/eef/joint_state/position
+  action:
+  - /left/lead/arm/joint_state/position
+  - /left/lead/eef/joint_state/position
+  - /right/lead/arm/joint_state/position
+  - /right/lead/eef/joint_state/position
+  intervention: /dagger/intervention
+  cameras:
+    base_0_rgb: /base_0_rgb/color/image_raw
+    left_wrist_0_rgb: /left_wrist_0_rgb/color/image_raw
+    right_wrist_0_rgb: /right_wrist_0_rgb/color/image_raw

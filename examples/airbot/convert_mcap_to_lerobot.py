@@ -143,19 +143,42 @@ class ConversionError(RuntimeError):
 
 
 def _read_episode_outcome(path: Path, *, required: bool) -> str:
+    """Read sidecar and embedded labels, rejecting contradictory annotations."""
     metadata_path = path.with_suffix(".episode.json")
-    if not metadata_path.is_file():
+    labels = []
+    if metadata_path.is_file():
+        try:
+            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ConversionError(f"invalid episode outcome metadata: {metadata_path.name}") from exc
+        labels.append((metadata_path.name, payload))
+    with path.open("rb") as file:
+        for attachment in make_reader(file).iter_attachments():
+            if attachment.name != "component_info":
+                continue
+            try:
+                component = json.loads(attachment.data)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ConversionError(f"invalid component_info JSON: {path.name}") from exc
+            if not isinstance(component, dict):
+                raise ConversionError(f"invalid component_info object: {path.name}")
+            if "episode_info" in component:
+                labels.append((f"{path.name}:component_info/episode_info", component["episode_info"]))
+    if not labels:
         if required:
-            raise ConversionError(f"missing episode outcome metadata: {metadata_path.name}")
+            raise ConversionError(f"missing sidecar and embedded episode outcome metadata: {path.name}")
         return "unknown"
-    try:
-        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ConversionError(f"invalid episode outcome metadata: {metadata_path.name}") from exc
-    outcome = payload.get("outcome") if isinstance(payload, dict) else None
-    if outcome not in {"success", "failure", "timeout"}:
-        raise ConversionError(f"invalid episode outcome: {outcome!r}")
-    return str(outcome)
+    outcomes = set()
+    for source, payload in labels:
+        outcome = payload.get("outcome") if isinstance(payload, dict) else None
+        if outcome not in ("success", "failure", "timeout"):
+            raise ConversionError(f"invalid episode outcome in {source}: {outcome!r}")
+        if "success" in payload and payload["success"] != int(outcome == "success"):
+            raise ConversionError(f"inconsistent success/outcome in {source}")
+        outcomes.add(outcome)
+    if len(outcomes) != 1:
+        raise ConversionError(f"conflicting sidecar/embedded episode outcomes: {path.name}")
+    return outcomes.pop()
 
 
 def decode_float_array(data: bytes) -> np.ndarray:
