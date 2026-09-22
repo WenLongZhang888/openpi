@@ -1,0 +1,43 @@
+# Offline LWD: joint V -> Q -> EMA -> QAM from step 1, fixed BC reference.
+datasets:
+  - data/lerobot/airbot_cube_200
+  - data/lerobot/cube_0920_100
+bc_checkpoint: checkpoints/pi05_airbot_cube/cube200_pi05base_4gpu_10k/4000
+actor_config: pi05_airbot_cube
+prompt: pick and place cube
+horizon: 32
+gamma: 0.9999
+td_steps: 1
+validation_fraction: 0.1
+seed: 42
+# GPU 0-3: global batch 32, local batch 8.
+batch_size: 32
+# Engineering budget for this 300-episode dataset, not a paper-prescribed count.
+num_train_steps: 10000
+critic_learning_rate: 0.0005
+qam:
+  num_steps: 10
+  epsilon: 0.1
+  temperature: 2.0
+  replan_steps: 32
+  critic_horizon: 32
+  action_dim: 14
+  action_clip: null
+  sample_from_reference: true
+  learning_rate: 0.00002
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+divl:
+  quantile_level: 0.6
+  alpha: 0.3
+  tau_min: 0.0
+  tau_max: 1.0
+  ema_rate: 0.005
+gemma_checkpoint: .cache/gemma-data/checkpoints/gemma3-270m-it
+gemma_tokenizer: .cache/gemma-data/tokenizers/tokenizer_gemma3.model
+siglip_checkpoint: .cache/huggingface/hub/models--google--siglip-so400m-patch14-224/snapshots/d04cf29fca7b6374f74d8bea1969314492266b5e
+log_interval: 10
+eval_interval: 200
+eval_batches: 8
+save_interval: 1000
+keep_checkpoints: 2

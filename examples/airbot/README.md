@@ -2,6 +2,9 @@
 
 Run commands from `/home/zwl/openpi` using `.venvs/openpi-b300`.
 
+For joint offline DIVL critic and QAM actor training on the demonstration and
+rollout datasets, see [AIRBOT offline LWD](lwd_offline.md).
+
 ## Dataset conversion
 
 ```bash
