@@ -1,0 +1,55 @@
+# Pure AIRBOT behavior cloning. The exported checkpoint contains the EMA actor.
+datasets:
+  - data/lerobot/airbot_cube_200
+bc_checkpoint: .cache/openpi/openpi-assets/checkpoints/pi05_base
+norm_stats_dir: assets/airbot_cube_200
+actor_model:
+  pi05: true
+  action_horizon: 32
+prompt: pick and place cube
+airbot:
+  fps: 25
+  action_dim: 14
+  norm_asset_id: airbot_cube_200
+  camera_mapping:
+    cam_high: base_0_rgb
+    cam_left_wrist: left_wrist_0_rgb
+    cam_right_wrist: right_wrist_0_rgb
+  delta_action_indices: [0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12]
+horizon: 32
+gamma: 0.9999
+seed: 42
+num_train_steps: 20000
+bc:
+  ema_decay: 0.99
+  optimizer:
+    b1: 0.9
+    b2: 0.95
+    eps: 1.0e-8
+    weight_decay: 1.0e-10
+    clip_gradient_norm: 1.0
+  lr_schedule:
+    warmup_steps: 1000
+    peak_lr: 2.5e-5
+    decay_steps: 20000
+    decay_lr: 2.5e-6
+log_interval: 10
+save_interval: 1000
+keep_checkpoints: 2
+mode: bc
+run_dir: checkpoints/pi05_airbot_cube/bc
+per_device_batch_size: 32
+runtime:
+  data_workers: 0
+  prefetch_batches: 2
+  data_worker_cpus: [16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+  gpus: [0]
+  cpu_threads: 16
+  omp_num_threads: 8
+  python_paths:
+    - src
+    - packages/openpi-client/src
+  library_paths:
+    - .cache/cube_bc_cudnn924/nvidia/cudnn/lib
+    - .venvs/openpi-b300/lib/python3.11/site-packages/nvidia/cu13/lib
+    - .venvs/openpi-b300/lib/python3.11/site-packages/nvidia/nccl/lib

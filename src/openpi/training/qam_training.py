@@ -65,6 +65,7 @@ class DIVLTrainingConfig:
     tau_min: float = 0.0
     tau_max: float = 1.0
     ema_rate: float = 0.005
+    max_grad_norm: float = 1.0
 
     def __post_init__(self):
         if not 0 <= self.tau_min <= self.quantile_level <= self.tau_max <= 1:
@@ -73,6 +74,8 @@ class DIVLTrainingConfig:
             raise ValueError("DIVL alpha must be finite and nonnegative")
         if not 0 <= self.ema_rate <= 1:
             raise ValueError("DIVL ema_rate must be in [0, 1]")
+        if not math.isfinite(self.max_grad_norm) or self.max_grad_norm <= 0:
+            raise ValueError("DIVL max_grad_norm must be finite and positive")
 
 
 DEFAULT_QAM_CONFIG = QAMTrainingConfig()
@@ -271,6 +274,7 @@ def offline_train_step(
         tau_min=divl_config.tau_min,
         tau_max=divl_config.tau_max,
         ema_rate=divl_config.ema_rate,
+        max_grad_norm=divl_config.max_grad_norm,
     )
     update_actor = actor_train_step if actor_update_fn is None else actor_update_fn
     next_rng, actor_metrics = update_actor(

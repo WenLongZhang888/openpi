@@ -35,7 +35,7 @@ def qam_velocity(
     return -velocity.astype(jnp.float32)
 
 
-def libero_actions_for_critic(
+def actions_for_critic(
     actor_actions: jax.Array,
     actor_q01: jax.Array,
     actor_q99: jax.Array,
@@ -54,8 +54,8 @@ def libero_actions_for_critic(
     action_dim=14 and action_clip=None. Defaults preserve LIBERO behavior.
     """
 
-    # LIBERO adaptation: evaluate the executed prefix of a 10-step plan.
-    # The 30-step critic array is storage capacity, not execution length.
+    # Evaluate only the prefix executed before the next replan. The critic
+    # horizon is storage capacity, not necessarily the execution length.
     prefix = actor_actions[:, :replan_steps, :action_dim].astype(jnp.float32)
 
     actor_low = jnp.asarray(actor_q01, dtype=jnp.float32)[:action_dim]
@@ -117,7 +117,7 @@ def qam_terminal_adjoint(
     endpoint_actions = jax.lax.stop_gradient(endpoint_actions.astype(jnp.float32))
 
     def objective(actions):
-        critic_actions, mask = libero_actions_for_critic(
+        critic_actions, mask = actions_for_critic(
             actions,
             action_q01,
             action_q99,
@@ -156,6 +156,11 @@ def qam_terminal_adjoint(
         jax.lax.stop_gradient(adjoint),
         jax.tree.map(jax.lax.stop_gradient, metrics),
     )
+
+
+# Compatibility for existing LIBERO callers. New code should use the task-neutral
+# name because the same coordinate conversion is also used by AIRBOT.
+libero_actions_for_critic = actions_for_critic
 
 
 def sample_qam_path(

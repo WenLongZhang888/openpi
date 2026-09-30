@@ -1,16 +1,21 @@
-"""Compute normalization statistics for a config.
+"""Compute normalization statistics for an OpenPI config or AIRBOT BC YAML.
 
-This script is used to compute the normalization statistics for a given config. It
-will compute the mean and standard deviation of the data in the dataset and save it
-to the config assets directory.
+OpenPI configs are selected with ``--config-name``. AIRBOT's unified trainer uses
+``--config`` and writes the statistics to that YAML's ``norm_stats_dir``.
 """
+
+from pathlib import Path
 
 import numpy as np
 import tqdm
 import tyro
+import yaml
 
 import openpi.models.model as _model
 import openpi.shared.normalize as normalize
+from openpi.training.airbot_lwd_data import AirbotDataConfig
+from openpi.training.airbot_lwd_data import AirbotReplay
+from openpi.training.airbot_lwd_data import Chunk
 import openpi.training.config as _config
 import openpi.training.data_loader as _data_loader
 import openpi.transforms as transforms
@@ -86,7 +91,7 @@ def create_rlds_dataloader(
     return data_loader, num_batches
 
 
-def main(config_name: str, max_frames: int | None = None):
+def compute_openpi_stats(config_name: str, max_frames: int | None = None) -> Path:
     config = _config.get_config(config_name)
     data_config = config.data.create(config.assets_dirs, config.model)
 
@@ -111,6 +116,90 @@ def main(config_name: str, max_frames: int | None = None):
     output_path = config.assets_dirs / data_config.repo_id
     print(f"Writing stats to: {output_path}")
     normalize.save(output_path, norm_stats)
+    return Path(output_path)
+
+
+def compute_airbot_stats(config_path: Path, max_frames: int | None = None) -> Path:
+    """Compute stats over the exact state/action representation used by AIRBOT BC."""
+    config = yaml.safe_load(config_path.read_text())
+    if config.get("mode") != "bc":
+        raise ValueError("AIRBOT normalization statistics must be computed from a mode: bc YAML")
+    if "norm_stats_dir" not in config:
+        raise ValueError("AIRBOT BC YAML must define norm_stats_dir")
+    if max_frames is not None and max_frames < 2:
+        raise ValueError("max_frames must be at least 2")
+
+    data_config = AirbotDataConfig.from_dict(config["airbot"])
+    replay = AirbotReplay(
+        config["datasets"],
+        horizon=config["horizon"],
+        gamma=config.get("gamma", 0.9999),
+        exclude_episodes=config.get("exclude_episodes", ()),
+        data_config=data_config,
+    )
+    episode_ids = [i for i, episode in enumerate(replay.episodes) if episode.outcome == "success"]
+    if not episode_ids:
+        raise ValueError("AIRBOT BC normalization requires explicitly labeled successful episodes")
+    if any(replay.episodes[i].gap is not None for i in episode_ids):
+        raise ValueError("AIRBOT BC normalization does not support successful recordings with gaps")
+
+    ends = np.cumsum([len(replay.episodes[i].state) for i in episode_ids])
+    total_frames = int(ends[-1])
+    frame_count = total_frames if max_frames is None else min(total_frames, max_frames)
+    if frame_count < 2:
+        raise ValueError("AIRBOT BC normalization requires at least two successful frames")
+    if frame_count == total_frames:
+        positions = np.arange(total_frames)
+    else:
+        positions = np.random.default_rng(config["seed"]).choice(total_frames, size=frame_count, replace=False)
+
+    stats = {key: normalize.RunningStats() for key in ("state", "actions")}
+    batch_size = 256
+    for offset in tqdm.tqdm(range(0, frame_count, batch_size), desc="Computing AIRBOT stats"):
+        batch_positions = positions[offset : offset + batch_size]
+        rows = np.searchsorted(ends, batch_positions, side="right")
+        previous_ends = np.where(rows > 0, ends[np.maximum(rows - 1, 0)], 0)
+        starts = batch_positions - previous_ends
+        states = []
+        actions = []
+        for row, start_value in zip(rows, starts, strict=True):
+            episode_id = episode_ids[int(row)]
+            episode = replay.episodes[episode_id]
+            start = int(start_value)
+            length = min(replay.horizon, len(episode.state) - start)
+            chunk = Chunk(
+                episode=episode_id,
+                start=start,
+                length=length,
+                next_index=min(start + length, len(episode.state) - 1),
+                terminal=start + length == len(episode.state),
+            )
+            physical_actions, _, _, _ = replay.transition(chunk)
+            physical_actions[length:] = physical_actions[length - 1]
+            states.append(episode.state[start])
+            actions.append(physical_actions)
+        stats["state"].update(np.stack(states))
+        stats["actions"].update(np.stack(actions))
+
+    norm_stats = {key: running.get_statistics() for key, running in stats.items()}
+    output_path = Path(config["norm_stats_dir"]).resolve()
+    print(f"Writing stats to: {output_path}")
+    normalize.save(output_path, norm_stats)
+    return output_path
+
+
+def main(
+    config_name: str | None = None,
+    config: Path | None = None,
+    max_frames: int | None = None,
+):
+    """Compute stats using exactly one of --config-name or --config."""
+    if (config_name is None) == (config is None):
+        raise ValueError("Specify exactly one of --config-name or --config")
+    if config is not None:
+        compute_airbot_stats(config.resolve(), max_frames)
+    else:
+        compute_openpi_stats(config_name, max_frames)
 
 
 if __name__ == "__main__":

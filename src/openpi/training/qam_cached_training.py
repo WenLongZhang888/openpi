@@ -1,5 +1,4 @@
 """Cached-prefix QAM for fixed-reference AIRBOT training.
-
 Actor prefix caches remain inside differentiation; reference velocities are
 reused only at the same states and times used during path generation.
 """
@@ -68,6 +67,13 @@ def sample_with_velocities(reference, observation, rng, *, config):
 
 
 def cached_actor_loss(actor, observation, times, path, adjoints, reference_velocities):
+    """QAM regression with diagnostic expansion R + G + C.
+
+    With delta = actor velocity - reference velocity, R = 4/sigma2 *
+    ||delta||^2, G = 4 * <delta, adjoint>, C = sigma2 * ||adjoint||^2.
+    G is signed and C is constant with respect to actor parameters.
+    Diagnostics do not change the optimized squared regression loss.
+    """
     # Construct INSIDE differentiation: image/prefix parameters retain gradients.
     cached_actor = CachedVelocity(actor, prefix_cache(actor, observation))
 
@@ -76,16 +82,35 @@ def cached_actor_loss(actor, observation, times, path, adjoints, reference_veloc
         sigma2 = 2 * (1 - w) / w
         target = jax.lax.stop_gradient(reference_velocity - 0.5 * sigma2 * adjoint)
         velocity = qam.qam_velocity(cached_actor, observation, actions, w)
+        delta = velocity - reference_velocity
         loss = jnp.mean(4 / sigma2 * jnp.sum((velocity - target) ** 2, axis=(-2, -1)))
-        deviation = jnp.mean(jnp.sum((velocity - reference_velocity) ** 2, axis=(-2, -1)))
-        return None, (loss, deviation)
+        regularization = jnp.mean(4 / sigma2 * jnp.sum(delta**2, axis=(-2, -1)))
+        guidance = jnp.mean(4 * jnp.sum(delta * adjoint, axis=(-2, -1)))
+        constant = jnp.mean(sigma2 * jnp.sum(adjoint**2, axis=(-2, -1)))
+        deviation = jnp.mean(jnp.sum(delta**2, axis=(-2, -1)))
+        return None, (loss, regularization, guidance, constant, deviation)
 
-    _, (losses, deviations) = jax.lax.scan(
+    _, (losses, regularizations, guidances, constants, deviations) = jax.lax.scan(
         jax.checkpoint(step), None, (times[:-1], path[:-1], adjoints[:-1], reference_velocities)
     )
     widths = jnp.diff(times)
     loss = jnp.sum(widths * losses)
-    return loss, {"qam_loss": loss, "velocity_deviation_integral": jnp.sum(widths * deviations)}
+    regularization = jnp.sum(widths * regularizations)
+    guidance = jnp.sum(widths * guidances)
+    constant = jnp.sum(widths * constants)
+    ratio_valid = regularization > 1e-8
+    denominator = jnp.maximum(regularization, 1e-8)
+    return loss, {
+        "qam_loss": loss,
+        "regularization_loss": regularization,
+        "guidance_loss": guidance,
+        "guidance_constant": constant,
+        "guidance_to_regularization_ratio": jnp.where(ratio_valid, jnp.abs(guidance) / denominator, 0.0),
+        "qam_to_regularization_ratio": jnp.where(ratio_valid, loss / denominator, 0.0),
+        "regularization_ratio_valid": ratio_valid,
+        "loss_decomposition_error": jnp.abs(loss - regularization - guidance - constant),
+        "velocity_deviation_integral": jnp.sum(widths * deviations),
+    }
 
 
 @functools.partial(nnx.jit, static_argnames=("config",))

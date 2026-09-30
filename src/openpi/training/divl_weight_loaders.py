@@ -22,15 +22,19 @@ def resolve_checkpoint_dirs(
         config.gemma_checkpoint,
     )
 
-    siglip_dir = snapshot_download(
-        repo_id=config.siglip_checkpoint,
-        revision=_SIGLIP_REVISION,
-        allow_patterns=[
-            "model.safetensors",
-            "config.json",
-            "preprocessor_config.json",
-        ],
-    )
+    siglip_ref = Path(config.siglip_checkpoint).expanduser()
+    if siglip_ref.is_dir():
+        siglip_dir = siglip_ref
+    else:
+        siglip_dir = Path(snapshot_download(
+            repo_id=config.siglip_checkpoint,
+            revision=_SIGLIP_REVISION,
+            allow_patterns=[
+                "model.safetensors",
+                "config.json",
+                "preprocessor_config.json",
+            ],
+        ))
 
     return gemma_dir, Path(siglip_dir)
 

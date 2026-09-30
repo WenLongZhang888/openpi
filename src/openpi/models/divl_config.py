@@ -20,6 +20,7 @@ class DIVLStateEncoderConfig:
     max_text_tokens: int = 200
 
     compute_dtype: Literal["bfloat16", "float32"] = "bfloat16"
+    siglip_attention_dtype: Literal["bfloat16", "float32"] | None = None
 
     @property
     def image_size(self) -> int:

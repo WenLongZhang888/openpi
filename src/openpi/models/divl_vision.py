@@ -16,6 +16,7 @@ class DIVLVisionEncoder(nnx.Module):
                 pool_type="none",
                 scan=True,
                 dtype_mm=config.compute_dtype,
+                attention_dtype=config.siglip_attention_dtype,
             )
         )
 

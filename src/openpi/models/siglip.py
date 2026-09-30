@@ -79,6 +79,7 @@ class Encoder1DBlock(nn.Module):
     num_heads: int = 12
     dropout: float = 0.0
     dtype_mm: str = "float32"
+    attention_dtype: str | None = None
 
     @nn.compact
     def __call__(self, x, deterministic=True):  # noqa: FBT002
@@ -89,8 +90,8 @@ class Encoder1DBlock(nn.Module):
             num_heads=self.num_heads,
             kernel_init=nn.initializers.xavier_uniform(),
             deterministic=deterministic,
-            dtype=self.dtype_mm,
-        )(y, y)
+            dtype=self.attention_dtype or self.dtype_mm,
+        )(y, y).astype(x.dtype)
         y = sharding.activation_sharding_constraint(y)
         y = nn.Dropout(rate=self.dropout)(y, deterministic)
         x = out["+sa"] = x + y
@@ -118,6 +119,7 @@ class Encoder(nn.Module):
     scan: bool = False
     remat_policy: str = "nothing_saveable"
     dtype_mm: str = "float32"
+    attention_dtype: str | None = None
 
     @nn.compact
     def __call__(self, x, deterministic=True):  # noqa: FBT002
@@ -139,6 +141,7 @@ class Encoder(nn.Module):
             )(
                 name="encoderblock",
                 dtype_mm=self.dtype_mm,
+                attention_dtype=self.attention_dtype,
                 mlp_dim=self.mlp_dim,
                 num_heads=self.num_heads,
                 dropout=self.dropout,
@@ -151,6 +154,7 @@ class Encoder(nn.Module):
                 block_cur = Encoder1DBlock(
                     name=f"encoderblock_{lyr}",
                     dtype_mm=self.dtype_mm,
+                    attention_dtype=self.attention_dtype,
                     mlp_dim=self.mlp_dim,
                     num_heads=self.num_heads,
                     dropout=self.dropout,
@@ -203,6 +207,7 @@ class _Module(nn.Module):
     # or "dots_with_no_batch_dims_saveable" for more speed (memory costly)
     remat_policy: str = "nothing_saveable"
     dtype_mm: str = "float32"
+    attention_dtype: str | None = None
 
     @nn.compact
     def __call__(self, image, *, train=False):
@@ -246,6 +251,7 @@ class _Module(nn.Module):
             scan=self.scan,
             remat_policy=self.remat_policy,
             dtype_mm=self.dtype_mm,
+            attention_dtype=self.attention_dtype,
             name="Transformer",
         )(x, deterministic=not train)
         encoded = out["encoded"] = x

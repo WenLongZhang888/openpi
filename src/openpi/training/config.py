@@ -762,53 +762,6 @@ _CONFIGS = [
         num_train_steps=30_000,
     ),
     #
-    # Fine-tuning AIRBOT on the 200 cube teleoperation episodes.
-    # Set HF_LEROBOT_HOME to the directory containing airbot_cube_200.
-    #
-    TrainConfig(
-        name="pi05_airbot_cube",
-        model=pi0_config.Pi0Config(pi05=True, action_horizon=32),
-        data=LeRobotAlohaDataConfig(
-            repo_id="airbot_cube_200",
-            # AIRBOT uses the same [left arm, gripper, right arm, gripper]
-            # layout, but must not use the Trossen joint/gripper conversion.
-            adapt_to_pi=False,
-            use_delta_joint_actions=True,
-            # Override the dataset's short "cube" label with the actual instruction.
-            default_prompt="pick and place cube",
-            repack_transforms=_transforms.Group(
-                inputs=[
-                    _transforms.RepackTransform(
-                        {
-                            "images": {
-                                "cam_high": "observation.images.base_0_rgb",
-                                "cam_left_wrist": "observation.images.left_wrist_0_rgb",
-                                "cam_right_wrist": "observation.images.right_wrist_0_rgb",
-                            },
-                            "state": "observation.state",
-                            "actions": "action",
-                        }
-                    )
-                ]
-            ),
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader(
-            "./.cache/openpi/openpi-assets/checkpoints/pi05_base/params"
-        ),
-        batch_size=32,
-        num_workers=2,
-        lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=1_000,
-            peak_lr=2.5e-5,
-            decay_steps=20_000,
-            decay_lr=2.5e-6,
-        ),
-        num_train_steps=20_000,
-        save_interval=1_000,
-        keep_period=5_000,
-        wandb_enabled=False,
-    ),
-    #
     # Fine-tuning Aloha configs.
     #
     # This is a test config that is used to illustate how train on a custom LeRobot dataset.

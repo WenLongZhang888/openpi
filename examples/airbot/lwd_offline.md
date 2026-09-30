@@ -1,151 +1,134 @@
-# AIRBOT cube：离线 LWD
+# AIRBOT BC and offline LWD
 
-从项目根目录 `/home/zwl/openpi` 运行。配置文件是
-[`lwd_offline.yaml`](lwd_offline.yaml)，入口是
-[`scripts/train_airbot_lwd.py`](../../scripts/train_airbot_lwd.py)。
+该入口在固定离线 replay 上联合训练 DIVL critic 和 QAM actor。BC checkpoint
+同时用于初始化可训练 actor 和独立的冻结 reference；之后 actor 持续由 QAM 更新，
+不会继续计算 BC/SFT loss。
 
-## 数据与初始化
+## 配置
 
-- BC 初始化：`checkpoints/pi05_airbot_cube/cube200_pi05base_4gpu_10k/4000`。
-- 固定数据池：`data/lerobot/airbot_cube_200` 和 `data/lerobot/cube_0920_100`，
-  共 300 条、53,284 帧，287 条成功、13 条失败。无在线采集或数据池刷新。
-- 按数据集、结果标签分层，并整条 episode 划分。训练 269 条（258 成功、11 失败），
-  验证 31 条（29 成功、2 失败）；对应 1,610 / 201 个动作段。均匀采样训练动作段。
-- 验证集只保证不参与当前 RL 更新。初始 BC 已使用 200 条示教，因此其中的示教验证
-  episode 不是对 BC 未见的数据；验证 TD loss 不能替代真机成功率。
-- Actor、reference、critic 都接收同一状态的三路相机和任务指令 `pick and place cube`。
-- AIRBOT 14 维动作顺序：左臂 6、左夹爪、右臂 6、右夹爪。关节目标转为相对于
-  动作段首帧状态的增量，夹爪保持绝对值。Actor 和 critic 共用 BC checkpoint 内
-  固定的分位数归一化统计；actor 网络保留 32 维输出，critic 使用前 14 维。
-  不施加 LIBERO 的物理动作 `[-1, 1]` 裁剪。
+`lwd_offline.yaml` 是 cube 示例，默认使用 200 条遥操作数据和 100 条
+rollout 数据。其他任务复制该 YAML 后修改数据与超参数。
 
-用户确认每次实际执行 32 步，因此预测和 critic 动作段均为 32 步（25 Hz 下 1.28 秒）。
-最后不足 32 步的动作段使用有效位掩码。成功标签位于 episode 级别，当前将成功奖励
-放在最后一个记录动作；其他奖励为 0，成功和失败的真实终止折扣均为 0。
-最后一帧只在终止 transition 中作为不参与 bootstrap 的 next-observation 占位。
+加入其他数据集时，复制此模板并修改 `datasets`；已知坏轨迹仍须通过
+`exclude_episodes` 排除。例如，若加入 `data/lerobot/cube_0921_100`，保留
+该批次已确认的排除项：
 
-12 条轨迹记录了接管时的时间间隔。间隔两侧分别组成动作段，丢弃跨间隔的那一步动作；
-间隔前的动作段仍 bootstrap 到最后一个连续观测，不把间隔伪造成成功或失败终止。
-
-## 训练设置及论文对应
-
-对照 [LWD v4 IV-B、IV-C 和附录 B](https://arxiv.org/html/2605.00416v4)：
-
-| 项目 | 本配置 |
-| --- | --- |
-| 更新顺序 | 每步 V → Q → target EMA → QAM actor |
-| critic-only warmup | 无，从第 1 步联合训练 |
-| actor 初始化 | AIRBOT BC checkpoint |
-| reference | 初始 BC 的独立固定副本，不更新 |
-| critic 初始化 | Gemma 3 270M、SigLIP So400M 预训练骨干，新建 V/Q 头 |
-| 参数更新范围 | Actor 和 critic 均全参数训练；reference、target 不参与梯度更新 |
-| actor 优化器 | AdamW，2e-5，余弦衰减，梯度范数裁剪 1 |
-| critic 优化器 | V、Q 两个 Adam，5e-4，余弦衰减，共享 encoder，独立动量 |
-| γ / τ / α | 0.9999 / 0.6 / 0.3 |
-| EMA 新参数权重 | 0.005 |
-| QAM 温度 | 2 |
-| TD | 短时 cube 任务采用 1-step **chunk-level** TD |
-| 训练预算 | 10,000 步，GPU 0–3，全局 batch 32（每卡 8） |
-| 保存 / 验证 | 每 1,000 / 200 步，以及本次运行最后一步 |
-
-10,000 步、全局 batch 32 和 AIRBOT 的 32 步动作长度是本数据集/硬件的工程配置，不是论文
-给定的实验规模。QAM 从固定 reference 生成路径（IV-B）；保留项目已有的 QAM
-数值实现：10 步、epsilon=0.1、配套 SDE/伴随系数、最后一步 reference ODE 去噪。
-这不是作者官方代码的逐项复现。LWD 伪代码中 endpoint 的记号与 IV-B 正文存在歧义；
-此处按正文使用生成动作的终点求 critic 梯度，不把 replay 失败动作作为 BC 监督。
-
-## 启动
-
-```bash
-cd /home/zwl/openpi
-CUDA_VISIBLE_DEVICES=0,1,2,3 bash examples/airbot/train_lwd_offline.sh \
-  --batch-size 32 --run-dir checkpoints/lwd_airbot_cube/offline_gpu03_b32
+```yaml
+exclude_episodes:
+  - dataset: cube_0921_100
+    source_file: 39.mcap
 ```
 
-启动脚本配置本机已验证的 CUDA/cuDNN、Gemma 依赖和本地模型缓存。使用四卡同步数据并行，模型与优化器复制到各卡，梯度跨卡同步。
-首次更新需要 JAX 编译。可更改 `CUDA_VISIBLE_DEVICES` 选择空闲卡。
+仅当相应数据集存在于 `datasets` 中时添加该条目；适配器会拒绝无法匹配的排除项。
 
-用 tmux 启动（本命令直接进入训练会话）：
+每个训练 YAML 都完整声明本次实验的数据集、BC checkpoint、训练超参数和
+`airbot` 数据模式。`airbot` 中的动作维度、相机映射、delta-action 维度与归一化
+asset ID 必须和该 checkpoint、数据集一致；新任务应新增自己的 YAML，不要在训练
+入口里增加任务特例。
 
-```bash
-tmux new-session -s lwd_cube_gpu03 -c /home/zwl/openpi \
-  'CUDA_VISIBLE_DEVICES=0,1,2,3 bash examples/airbot/train_lwd_offline.sh --batch-size 32 --run-dir checkpoints/lwd_airbot_cube/offline_gpu03_b32'
-```
+默认配置使用：
 
-按 `Ctrl+b`，再按 `d` 离开会话，训练继续。重新进入：
+- 32 步动作段和 1-step chunk-level TD；
+- `gamma=0.9999`；成功 terminal reward 位于最后一个有效动作，失败为 0；
+- 固定 BC reference 采样，10 个 QAM 时间步；
+- actor AdamW `2e-5`，critic Adam `5e-4`；
+- 全局 batch 32，设备数由 `runtime.gpus` 决定。
 
-```bash
-tmux attach-session -t lwd_cube_gpu03
-```
+## 环境与统一模式
 
-续训必须保持数据、配置、BC 归一化统计不变：
+统一入口为 `scripts/train_airbot_lwd.py`，`mode: bc` 只训练 actor/EMA，
+`mode: offline` 执行 DIVL + QAM。
+配置文件的 `runtime` 控制设备、CPU worker 和机器依赖路径，
+`batch_size` 由 GPU 数 × `per_device_batch_size` 得到，可用 `--batch-size` 显式覆盖。
 
-```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 bash examples/airbot/train_lwd_offline.sh \
-  --batch-size 32 --run-dir checkpoints/lwd_airbot_cube/offline_gpu03_b32 --resume
-```
+## BC 归一化与训练
 
-`config.json` 保存生效配置，`replay_manifest.json` 保存 episode 划分和元数据哈希，
-`metrics.jsonl` 记录每步训练指标及固定验证样本的指标。验证仅用于观察，不自动选优。
-遇到非有限 loss/梯度立即停止，并保留此前完整 checkpoint。
-
-每个 `checkpoints/<step>/` 保存 actor、固定 reference、critic/target、三个优化器、RNG
-及步数，可恢复联合训练；同时包含标准 OpenPI 的 `params/` 和
-`assets/airbot_cube_200/norm_stats.json`，供 `pi05_airbot_cube` 推理配置加载。
-只保留最近两个完整 checkpoint，新 checkpoint 保存成功后才清理旧 checkpoint。
-不完整 checkpoint 位于 `<step>.incomplete`，不会用于恢复。
-
-## 验证命令
-
-仅数据预检（不加载大模型）：
+`lwd_bc.yaml` 是正式 BC 配置，也是 AIRBOT normalization stats 的唯一配置来源。
+首次训练或数据发生变化后先计算统计量：
 
 ```bash
-JAX_PLATFORMS=cpu bash examples/airbot/train_lwd_offline.sh \
-  --prepare-only --run-dir .cache/airbot_lwd/preflight
+$OPENPI_PYTHON scripts/compute_norm_stats.py \
+  --config examples/airbot/lwd_bc.yaml
 ```
 
-两步真实联合更新、保存和恢复检查（使用独立目录）：
+统计量写入该 YAML 的 `norm_stats_dir`。计算过程和训练共用 `AirbotReplay.transition()`，
+因此 joint delta、动作 horizon 和 terminal padding 语义保持一致。然后执行预检和训练：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 bash examples/airbot/train_lwd_offline.sh \
-  --smoke-steps 2 --batch-size 32 --run-dir .cache/airbot_lwd/smoke_gpu03_b32
+$OPENPI_PYTHON scripts/train_airbot_lwd.py \
+  --config examples/airbot/lwd_bc.yaml \
+  --check
+
+$OPENPI_PYTHON scripts/train_airbot_lwd.py \
+  --config examples/airbot/lwd_bc.yaml
 ```
 
-`--smoke-steps` 限制本次更新次数，不改变 10,000 步学习率调度。
-测试 checkpoint 可在同目录用 `--resume` 继续，但正式实验建议使用新的 run 目录。
+OpenPI 其他任务仍可通过 `compute_norm_stats.py --config-name <name>` 使用原有
+`TrainConfig` 统计流程；AIRBOT 不再在 `training/config.py` 注册独立配置。
 
-## 本机验证记录
+`runtime.data_workers: 0` 使用主进程串行构造 batch。将其设为正数会启用
+`airbot_parallel_loader.py` 的 CPU worker 和共享内存预取；此时还需配置
+`runtime.data_worker_cpus`，并可用 `runtime.prefetch_batches` 控制缓冲区数量。
 
-数据预检与 7 项动作/边界回归检查已通过。B300 单卡、batch 4 的两步联合更新均为有限值，
-训练 critic loss 为 36.798、24.212；已确认 actor/critic 参数探针变化、reference 参数探针
-保持不变，并完成完整训练 checkpoint 的保存和恢复。导出 actor 可通过标准
-`pi05_airbot_cube` 配置加载，全部 3,353,433,872 个参数为有限值。
-这些是运行连通性检查，不是收敛或真机成功率结论。
+W&B 默认关闭。需要记录实验时可在任一训练 YAML 中加入：
 
-- 数据报告：`.cache/airbot_lwd/preflight/data_audit.json`
-- 联合训练报告：`.cache/airbot_lwd/smoke/smoke_report_2.json`
-- 导出加载报告：`.cache/airbot_lwd/export_validation.json`
+```yaml
+wandb:
+  enabled: true
+  project: airbot-lwd
+  name: cube-offline
+```
 
-四卡配置验证（GPU 0–3，全局 batch 32、每卡 8）：两步联合更新均为有限值，
-critic loss 为 37.417、14.897，模型/优化器复制状态检查通过。首次编译后第二步约 7 秒。
-四设备全局梯度归约的独立回归检查也通过（总计 8 项）。
-四卡测试报告目录：`.cache/airbot_lwd/smoke_gpu03_b32/`。
+`airbot_wandb.py` 会为同一 `run_dir` 保存稳定的 run ID，恢复训练时继续写入同一条记录；
+checkpoint 本身始终保存在本地。
 
-## 2026-09-21：统一优化入口
+## 数据预检与训练
 
-`examples/airbot/train_lwd_offline.sh` 现统一启用优化实现，直接运行
-`scripts/train_airbot_lwd.py` 也使用同一实现。默认 GPU 仍为 0–3，
-支持原有参数和 `CUDA_VISIBLE_DEVICES` 覆盖。旧的独立优化启动器仅转发至统一入口。
+只检查配置、标签、数据形状、terminal 语义和动作归一化：
 
-优化包括：单次更新内复用 reference/actor 的图像语言 KV 前缀（Actor 前缀仍参与求导）；
-复用 reference 采样路径上已经计算的速度；缓存训练动作段起点/后继观测的解码图像。
-仅对 AIRBOT 的固定 reference 采样启用该 QAM 实现，其他任务原有默认更新函数不变。
-TD、QAM 的 10 个时间步、优化器及 checkpoint 格式不变。
+```bash
+$OPENPI_PYTHON scripts/train_airbot_lwd.py \
+  --config examples/airbot/lwd_offline.yaml \
+  --run-dir checkpoints/lwd_airbot_cube/preflight \
+  --prepare-only
+```
 
-两卡 GPU 6、7、每卡 batch 8 的独立诊断中，Actor 更新从 5.458 秒降至 0.597 秒；
-优化完整步（尚未加解码图像缓存）为 1.257 秒。低精度图计算和梯度累加顺序有所改变：
-单步损失差异约 0.77%，参数更新相对 L2 差异约 5.17%，因此不是逐位等价替换。
-具体诊断位于 `.cache/airbot_lwd/perf_gpu67_20260921/`。
+训练或恢复：
 
-每次训练会保存 `implementation.json` 标记所用实现。续训仍要求配置和数据快照一致。
-修改代码不会改变已经运行的旧进程；只有重新启动的进程使用优化实现。
+```bash
+$OPENPI_PYTHON scripts/train_airbot_lwd.py \
+  --config examples/airbot/lwd_offline.yaml \
+  --run-dir checkpoints/lwd_airbot_cube/offline
+
+$OPENPI_PYTHON scripts/train_airbot_lwd.py \
+  --config examples/airbot/lwd_offline.yaml \
+  --run-dir checkpoints/lwd_airbot_cube/offline \
+  --resume
+```
+
+恢复训练会同时校验解析后的训练配置、replay manifest 和训练实现源码哈希。
+任何一项变化都会拒绝续训，避免新代码静默接到旧优化器状态上。完整 checkpoint
+保存 actor、固定 reference、critic/target、三个优化器、RNG 和归一化资产；`params/`
+可直接作为部署 actor。
+
+## terminal chunk 语义
+
+一个 chunk 是从一条 episode 中截出的、长度不超过 horizon 的连续动作段。
+非 terminal chunk 的 `next_observation` 是该动作段之后的状态，并用
+`gamma ** chunk_length` bootstrap。terminal chunk 没有 episode 外的下一状态，
+因此 discount 为 0；当前实现用最后一条已记录 observation 填充张量位置，但 critic
+不会读取其 bootstrap value。
+
+当前适配器将 terminal 行的 action 计为有效动作。这只有在 MCAP 的 `action[t]`
+表示从 `state[t]` 开始执行的命令时才成立；若采集格式把最后一行仅作为终止观测，
+应先修正转换/切块语义，不能仅靠 mask 掩盖。
+
+## 缓存 QAM
+
+默认 actor 更新与 `qam_training.actor_train_step` 的算法流程相同，但复用 Pi0 的
+图像/语言 prefix KV，并复用固定 reference 在采样路径上已经计算过的 velocity。
+缓存仅减少重复前向计算；path、terminal Q 梯度、反向 adjoint 和 actor optimizer
+仍按原顺序执行。该实现只允许 `sample_from_reference: true`。
+
+缓存实现与 Pi0 的 `embed_prefix`、`embed_suffix` 和 KV-cache 接口直接耦合；修改
+Pi0 attention 实现后必须重新开始训练，不能绕过实现哈希校验恢复旧 run。
